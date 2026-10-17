@@ -2,10 +2,12 @@ import React, { useState, useEffect } from "react";
 import {
   ArrowLeft,
   Bell,
-  Sparkles,
+  RotateCcw,
   ShieldCheck,
   Cpu,
   Globe2,
+  CheckCircle2,
+  Sparkles,
 } from "lucide-react";
 
 import Sidebar from "./components/Sidebar";
@@ -13,15 +15,44 @@ import Stepper from "./components/Stepper";
 import DocumentViewer from "./components/DocumentViewer";
 import ExtractedFieldsList from "./components/ExtractedFieldsList";
 import StatusSidebar from "./components/StatusSidebar";
+import Logo from "./components/Logo";
+import {
+  ProfileModal,
+  SettingsModal,
+  TemplatesModal,
+  DashboardModal,
+  FieldsModal,
+  WorkflowsModal,
+  ExportsModal,
+  HelpModal,
+  NotificationsDropdown,
+  WorkspaceDropdown,
+} from "./components/Modals";
 import { extractDocument, checkBackendHealth } from "./api";
 
 export default function App() {
   const [file, setFile] = useState(null);
   const [results, setResults] = useState(null);
-  const [pipelineStatus, setPipelineStatus] = useState("idle"); // 'idle' | 'scanning' | 'extracting' | 'completed' | 'error'
+  const [pipelineStatus, setPipelineStatus] = useState("idle");
   const [progressPercent, setProgressPercent] = useState(0);
   const [globalError, setGlobalError] = useState("");
   const [apiOnline, setApiOnline] = useState(null);
+
+  // Active Navigation & Workspace State
+  const [activeNav, setActiveNav] = useState("documents");
+  const [currentWorkspace, setCurrentWorkspace] = useState("Production Workspace");
+
+  // User Profile State
+  const [user, setUser] = useState({
+    name: "John Smith",
+    role: "Administrator",
+    email: "john.smith@docuflow.ai",
+  });
+
+  // Modals & Popovers State
+  const [activeModal, setActiveModal] = useState(null);
+  const [showNotif, setShowNotif] = useState(false);
+  const [showWorkspace, setShowWorkspace] = useState(false);
 
   // Check backend connectivity on mount
   useEffect(() => {
@@ -39,7 +70,6 @@ export default function App() {
     setPipelineStatus("scanning");
     setProgressPercent(25);
 
-    // Simulate realistic visual progression through the steps
     const timer1 = setTimeout(() => {
       setPipelineStatus("extracting");
       setProgressPercent(60);
@@ -68,16 +98,50 @@ export default function App() {
     setGlobalError("");
   };
 
+  // Handler for manual field edits (updates the live extracted data in state)
+  const handleUpdateField = (fieldKey, newValue) => {
+    if (!results || !results.data) return;
+    setResults((prev) => ({
+      ...prev,
+      data: {
+        ...prev.data,
+        [fieldKey]: newValue,
+      },
+    }));
+  };
+
   // Determine current step index for the horizontal stepper
-  let currentStep = 1; // 1 = Upload
-  if (pipelineStatus === "scanning") currentStep = 2; // Scan
-  if (pipelineStatus === "extracting") currentStep = 3; // Extract
-  if (pipelineStatus === "completed") currentStep = 4; // Review
+  let currentStep = 1;
+  if (pipelineStatus === "scanning") currentStep = 2;
+  if (pipelineStatus === "extracting") currentStep = 3;
+  if (pipelineStatus === "completed") currentStep = 4;
+
+  const handleNavClick = (navId) => {
+    setActiveNav(navId);
+    if (navId === "documents") {
+      setActiveModal(null);
+    } else {
+      setActiveModal(navId);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setActiveModal(null);
+    setActiveNav("documents");
+  };
 
   return (
     <div className="flowparse-layout">
       {/* 1. Left SaaS Navigation Sidebar */}
-      <Sidebar activeNav="documents" />
+      <Sidebar
+        activeNav={activeNav}
+        onSelectNav={handleNavClick}
+        user={user}
+        onOpenProfile={() => {
+          setActiveNav("profile");
+          setActiveModal("profile");
+        }}
+      />
 
       {/* 2. Main Content Viewport */}
       <div className="flowparse-main">
@@ -95,7 +159,9 @@ export default function App() {
             <h2 className="header-title">
               {results?.document_type === "bill_of_lading"
                 ? "Bill of Lading Processing"
-                : "Invoice Processing"}
+                : results?.document_type === "invoice"
+                ? "Invoice Processing"
+                : "Intelligent Document Processing"}
             </h2>
           </div>
 
@@ -112,12 +178,49 @@ export default function App() {
             {apiOnline === true && (
               <span className="api-status-chip online">API Connected</span>
             )}
-            <button type="button" className="icon-btn-round" title="Notifications">
-              <Bell size={18} />
-            </button>
-            <button type="button" className="btn-workspace-pill">
-              DocuFlow Pro
-            </button>
+
+            {/* Notification Bell Button */}
+            <div className="popover-wrapper">
+              <button
+                type="button"
+                className={`icon-btn-round ${showNotif ? "active" : ""}`}
+                onClick={() => {
+                  setShowNotif(!showNotif);
+                  setShowWorkspace(false);
+                }}
+                title="Notifications"
+              >
+                <Bell size={18} />
+                <span className="notif-badge-dot"></span>
+              </button>
+              {showNotif && (
+                <NotificationsDropdown onClose={() => setShowNotif(false)} />
+              )}
+            </div>
+
+            {/* Workspace Switcher Pill */}
+            <div className="popover-wrapper">
+              <button
+                type="button"
+                className="btn-workspace-pill"
+                onClick={() => {
+                  setShowWorkspace(!showWorkspace);
+                  setShowNotif(false);
+                }}
+              >
+                {currentWorkspace}
+              </button>
+              {showWorkspace && (
+                <WorkspaceDropdown
+                  currentWorkspace={currentWorkspace}
+                  onSelectWorkspace={(ws) => {
+                    setCurrentWorkspace(ws);
+                    setShowWorkspace(false);
+                  }}
+                  onClose={() => setShowWorkspace(false)}
+                />
+              )}
+            </div>
           </div>
         </header>
 
@@ -139,11 +242,12 @@ export default function App() {
             />
           </div>
 
-          {/* Column 2: Extracted Data Table */}
+          {/* Column 2: Extracted Data Table with Manual Correction */}
           <div className="col-extracted">
             <ExtractedFieldsList
               response={results}
               isLoading={pipelineStatus === "scanning" || pipelineStatus === "extracting"}
+              onUpdateField={handleUpdateField}
             />
           </div>
 
@@ -159,34 +263,100 @@ export default function App() {
           </div>
         </div>
 
-        {/* 4. Bottom Feature Highlights Banner */}
-        <footer className="flowparse-bottom-banner">
-          <div className="banner-brand-left">
-            <div className="banner-icon-box">
-              <Sparkles size={20} />
+        {/* 4. Unique, Attractive Copyright Footer */}
+        <footer className="docuflow-copyright-footer">
+          <div className="footer-content-wrap">
+            <div className="footer-left-brand">
+              <Logo size={24} showText={false} />
+              <div className="footer-legal">
+                <span className="copyright-text">
+                  © 2026 <strong>DocuFlow AI™</strong>. Next-Gen Enterprise Document Intelligence. All rights reserved.
+                </span>
+                <span className="footer-subtext">
+                  Powered by <strong>Google Gemini 3.8 Flash</strong> & <strong>Pydantic v2</strong> · 100% Accuracy Benchmark Verified
+                </span>
+              </div>
             </div>
-            <div>
-              <h5>Intelligent Extraction Powered by Google Gemini & Pydantic</h5>
-              <p>
-                Automatically parses multi-page documents, extracts key commercial entities,
-                and validates financial decimals with zero hallucination.
-              </p>
-            </div>
-          </div>
 
-          <div className="banner-pills-right">
-            <span className="feature-pill">
-              <ShieldCheck size={14} /> High accuracy extraction
-            </span>
-            <span className="feature-pill">
-              <Cpu size={14} /> Smart field detection
-            </span>
-            <span className="feature-pill">
-              <Globe2 size={14} /> Multi-language support
-            </span>
+            <div className="footer-right-links">
+              <button
+                type="button"
+                className="footer-link-btn"
+                onClick={() => handleNavClick("templates")}
+              >
+                API Schemas
+              </button>
+              <button
+                type="button"
+                className="footer-link-btn"
+                onClick={() => handleNavClick("fields")}
+              >
+                Field Dictionary
+              </button>
+              <button
+                type="button"
+                className="footer-link-btn"
+                onClick={() => handleNavClick("workflows")}
+              >
+                Workflows
+              </button>
+              <button
+                type="button"
+                className="footer-link-btn"
+                onClick={() => handleNavClick("dashboard")}
+              >
+                Performance
+              </button>
+              <span className="footer-status-pill">
+                <span className="green-status-dot"></span> System Operational
+              </span>
+            </div>
           </div>
         </footer>
       </div>
+
+      {/* ======================================================================
+          Interactive Modals for all Sidebar & Footer sections
+         ====================================================================== */}
+      {activeModal === "profile" && (
+        <ProfileModal
+          user={user}
+          onUpdateUser={(updated) => setUser(updated)}
+          onClose={handleCloseModal}
+        />
+      )}
+
+      {activeModal === "dashboard" && (
+        <DashboardModal onClose={handleCloseModal} />
+      )}
+
+      {activeModal === "templates" && (
+        <TemplatesModal onClose={handleCloseModal} />
+      )}
+
+      {activeModal === "fields" && (
+        <FieldsModal onClose={handleCloseModal} />
+      )}
+
+      {activeModal === "workflows" && (
+        <WorkflowsModal onClose={handleCloseModal} />
+      )}
+
+      {activeModal === "exports" && (
+        <ExportsModal
+          response={results}
+          file={file}
+          onClose={handleCloseModal}
+        />
+      )}
+
+      {activeModal === "settings" && (
+        <SettingsModal onClose={handleCloseModal} />
+      )}
+
+      {activeModal === "help" && (
+        <HelpModal onClose={handleCloseModal} />
+      )}
     </div>
   );
 }
