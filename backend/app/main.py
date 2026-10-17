@@ -3,9 +3,10 @@ FastAPI Backend Application Entrypoint.
 
 Provides:
 - Health check endpoint (GET /api/health)
-- PDF upload and text extraction endpoint (POST /api/extract/text)
+- Complete End-to-End Extraction endpoint (POST /api/extract)
+- PDF upload and text extraction preview (POST /api/extract/text)
 - CORS middleware for React frontend integration
-- Request validation and security protections (file type, size limits, magic bytes)
+- Request validation, size limit enforcement, and magic byte verification
 """
 import logging
 from fastapi import FastAPI, File, UploadFile, HTTPException, status
@@ -13,12 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from backend.app.config import settings
+from backend.app.schemas import ExtractionResponse
+from backend.app.extractor import DocumentExtractorPipeline
 from backend.app.pdf_parser import (
     PDFParser,
     PDFExtractionResult,
     CorruptedPDFError,
     EmptyPDFError,
-    ScannedPDFError,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,10 +46,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Instantiate singleton extraction pipeline
+extractor_pipeline = DocumentExtractorPipeline()
+
 
 @app.get("/", include_in_schema=False)
 def root_redirect():
-    """Redirect root traffic to the interactive Swagger UI."""
+    """Redirect root traffic to interactive Swagger UI."""
     return RedirectResponse(url="/docs")
 
 
@@ -70,30 +75,30 @@ def health_check():
 
 
 @app.post(
-    f"{settings.API_PREFIX}/extract/text",
-    tags=["PDF Processing"],
-    summary="Upload PDF and Extract Raw Text",
+    f"{settings.API_PREFIX}/extract",
+    tags=["Document Extraction"],
+    summary="Upload PDF and Extract Structured Data",
+    response_model=ExtractionResponse,
     status_code=status.HTTP_200_OK,
 )
-async def extract_pdf_text(file: UploadFile = File(...)):
+async def extract_document(file: UploadFile = File(...)):
     """
-    Upload a PDF document, validate its binary structure and size,
-    and extract all selectable text page-by-page.
-
-    Security & Validation checks:
-    1. Filename validation: Must have a .pdf extension.
-    2. File size limit: Must not exceed configured MAX_UPLOAD_SIZE_MB (default 10MB).
-    3. Magic byte signature: Must begin with `%PDF` binary header.
-    4. Corrupt/Empty detection: Reject malformed or empty documents safely.
+    End-to-end extraction endpoint:
+    1. Validates file extension, size limit, and PDF magic bytes.
+    2. Extracts text using pypdf.
+    3. Detects scanned documents requiring OCR.
+    4. Classifies document as Invoice or Bill of Lading.
+    5. Prompts Gemini with schema-constrained JSON outputs.
+    6. Validates data with Pydantic and returns structured response.
     """
-    # 1. Filename extension check
+    # 1. Filename validation
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid file format. Only PDF files (.pdf) are supported.",
         )
 
-    # 2. Read file content into memory
+    # 2. Read in-memory bytes
     content = await file.read()
     file_size = len(content)
 
@@ -114,32 +119,69 @@ async def extract_pdf_text(file: UploadFile = File(...)):
             ),
         )
 
-    # 5. Magic byte signature check (Reject disguised files, e.g., an .exe renamed to .pdf)
+    # 5. Magic byte verification
     if not content.startswith(settings.PDF_MAGIC_BYTES):
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Invalid PDF structure. File header does not match PDF specification (%PDF).",
         )
 
-    # 6. Extract text with graceful OCR detection
-    try:
-        extraction: PDFExtractionResult = PDFParser.extract_text(
-            content,
-            strict_ocr_check=False  # Return requires_ocr flag in response rather than crashing
-        )
-    except (CorruptedPDFError, EmptyPDFError) as exc:
+    # 6. Process through unified extraction pipeline
+    result = extractor_pipeline.process_document(content, filename=file.filename)
+    return result
+
+
+@app.post(
+    f"{settings.API_PREFIX}/extract/text",
+    tags=["PDF Processing"],
+    summary="Upload PDF and Extract Raw Text",
+    status_code=status.HTTP_200_OK,
+)
+async def extract_pdf_text(file: UploadFile = File(...)):
+    """
+    Inspect raw extracted text from a PDF without invoking the LLM.
+    Useful for quick text validation, debugging, and testing OCR requirements.
+    """
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        )
-    except Exception as exc:
-        logger.error(f"Unexpected error parsing PDF {file.filename}: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal error occurred while processing the PDF.",
+            detail="Invalid file format. Only PDF files (.pdf) are supported.",
         )
 
-    # 7. Formulate structured response
+    content = await file.read()
+    file_size = len(content)
+
+    if file_size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The uploaded PDF file is empty (0 bytes).",
+        )
+
+    if file_size > settings.MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit.",
+        )
+
+    if not content.startswith(settings.PDF_MAGIC_BYTES):
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Invalid PDF structure. File header does not match PDF specification (%PDF).",
+        )
+
+    try:
+        extraction: PDFExtractionResult = PDFParser.extract_text(
+            content, strict_ocr_check=False
+        )
+    except (CorruptedPDFError, EmptyPDFError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Error parsing PDF text {file.filename}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal error occurred while processing PDF text.",
+        )
+
     warnings = []
     if extraction.requires_ocr:
         warnings.append(
